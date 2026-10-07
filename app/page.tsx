@@ -1,30 +1,122 @@
 "use client";
 
 import { Canvas } from "@react-three/fiber";
-import { Suspense, useEffect, useRef, useState } from "react";
-import type { MouseEvent } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
+import type { CSSProperties, MouseEvent } from "react";
 import { Environment } from "@react-three/drei";
 
+import "./components/site.css";
 import Dragon from "./components/Animal";
 import Decor from "./components/Decor";
+import SushiArt from "./components/SushiArt";
+import SushiScroll from "./components/SushiScroll";
+import Cart from "./components/Cart";
+import Footer from "./components/Footer";
+import { KatanaDivider, SliceTitle } from "./components/Katana";
+import { SETS } from "./components/sets";
 
-const SETS = [
-  { id: "01", name: "DRAGON SET", price: "35 AZN", note: "8 pcs · salmon · tuna" },
-  { id: "02", name: "SAKURA SET", price: "42 AZN", note: "12 pcs · shrimp · cream cheese" },
-  { id: "03", name: "KYOTO SET", price: "48 AZN", note: "16 pcs · eel · avocado" },
-];
+type NavId = "home" | "sets" | "menu" | "about";
 
 export default function Home() {
   const sectionRef = useRef<HTMLElement>(null);
   const progressRef = useRef<number>(0);
   const stageRef = useRef<number>(0);
+  const navRef = useRef<NavId>("home");
+  const slashCount = useRef(0);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const bumpTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [stage, setStage] = useState(0); // 0 интро, 1 история, 2 меню
-  const [cart, setCart] = useState(0);
+  const [activeNav, setActiveNav] = useState<NavId>("home");
+  const [cart, setCart] = useState<Record<number, number>>({});
+  const [cartOpen, setCartOpen] = useState(false);
   const [bump, setBump] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const [openId, setOpenId] = useState<number | null>(null);
+  const [slash, setSlash] = useState<{ k: number; a: number } | null>(null);
 
-  // Свечение фона следует за мышкой (дракон не двигается)
+  const cartCount = Object.values(cart).reduce((a, b) => a + b, 0);
+  const cartItems = Object.entries(cart)
+    .filter(([, q]) => q > 0)
+    .map(([k, q]) => ({ kind: Number(k), qty: q }));
+
+  /* ---------- удар катаны по экрану ---------- */
+  const doSlash = useCallback(() => {
+    slashCount.current += 1;
+    const dir = Math.random() < 0.5 ? -1 : 1;
+    setSlash({ k: slashCount.current, a: dir * (22 + Math.random() * 18) });
+    setTimeout(() => setSlash(null), 750);
+  }, []);
+
+  /* ---------- уведомление ---------- */
+  const showToast = useCallback((text: string) => {
+    setToast(text);
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), 1900);
+  }, []);
+
+  /* ---------- корзина ---------- */
+  const addToCart = useCallback(
+    (kind: number) => {
+      setCart((c) => ({ ...c, [kind]: (c[kind] || 0) + 1 }));
+      setBump(true);
+      if (bumpTimer.current) clearTimeout(bumpTimer.current);
+      bumpTimer.current = setTimeout(() => setBump(false), 450);
+      showToast(`${SETS[kind]?.name ?? "SET"} ADDED`);
+    },
+    [showToast]
+  );
+
+  const changeQty = useCallback((kind: number, delta: number) => {
+    setCart((c) => {
+      const q = Math.max(0, (c[kind] || 0) + delta);
+      const next = { ...c, [kind]: q };
+      if (q === 0) delete next[kind];
+      return next;
+    });
+  }, []);
+
+  const checkout = () => {
+    setCart({});
+    setCartOpen(false);
+    showToast("DEMO: ORDER SENT");
+  };
+
+  // Дракон съел суши -> корзина +1
+  useEffect(() => {
+    const onAte = (e: Event) => {
+      addToCart((e as CustomEvent).detail?.kind ?? 0);
+    };
+    window.addEventListener("dragon:ate", onAte);
+    return () => window.removeEventListener("dragon:ate", onAte);
+  }, [addToCart]);
+
+  /* ---------- свиток ---------- */
+  const openSet = (i: number) => {
+    doSlash();
+    setTimeout(() => setOpenId(i), 220);
+  };
+  const closeSet = useCallback(() => setOpenId(null), []);
+
+  /* ---------- навигация ---------- */
+  const goTo = (id: NavId) => {
+    const hero = sectionRef.current;
+    if (id === "home") {
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    } else if (id === "menu" && hero) {
+      const total = hero.offsetHeight - window.innerHeight;
+      window.scrollTo({ top: hero.offsetTop + total * 0.8, behavior: "smooth" });
+    } else {
+      document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  };
+
+  const navClick = (e: MouseEvent, id: NavId) => {
+    e.preventDefault();
+    goTo(id);
+  };
+
+  /* ---------- свечение фона за мышкой ---------- */
   const handleMouseMove = (e: MouseEvent<HTMLElement>) => {
     const el = sectionRef.current;
     if (!el) return;
@@ -34,7 +126,7 @@ export default function Home() {
     el.style.setProperty("--my", `${55 + y * 6}%`);
   };
 
-  // Прогресс скролла внутри героя -> камера и стадии
+  /* ---------- скролл: камера, стадии, активный пункт меню ---------- */
   useEffect(() => {
     const el = sectionRef.current;
     if (!el) return;
@@ -42,8 +134,9 @@ export default function Home() {
     let raf = 0;
     const update = () => {
       raf = 0;
+      const vh = window.innerHeight;
       const rect = el.getBoundingClientRect();
-      const total = rect.height - window.innerHeight;
+      const total = rect.height - vh;
       const p = total > 0 ? Math.min(1, Math.max(0, -rect.top / total)) : 0;
 
       progressRef.current = p;
@@ -53,6 +146,21 @@ export default function Home() {
       if (next !== stageRef.current) {
         stageRef.current = next;
         setStage(next);
+      }
+
+      // какой пункт навбара активен
+      const y = window.scrollY;
+      const heroEnd = el.offsetTop + total;
+      const setsEl = document.getElementById("sets");
+      const aboutEl = document.getElementById("about");
+      let nav: NavId = "home";
+      if (y < heroEnd - 1) nav = p >= 0.5 ? "menu" : "home";
+      else if (aboutEl && y + vh * 0.55 >= aboutEl.offsetTop) nav = "about";
+      else if (setsEl && y + vh * 0.5 >= setsEl.offsetTop) nav = "sets";
+
+      if (nav !== navRef.current) {
+        navRef.current = nav;
+        setActiveNav(nav);
       }
     };
     const onScroll = () => {
@@ -66,30 +174,6 @@ export default function Home() {
       window.removeEventListener("scroll", onScroll);
       window.removeEventListener("resize", onScroll);
       if (raf) cancelAnimationFrame(raf);
-    };
-  }, []);
-
-  // Дракон съел суши -> корзина +1
-  useEffect(() => {
-    let t1: ReturnType<typeof setTimeout>;
-    let t2: ReturnType<typeof setTimeout>;
-
-    const onAte = (e: Event) => {
-      const kind = (e as CustomEvent).detail?.kind ?? 0;
-      setCart((c) => c + 1);
-      setBump(true);
-      setToast(`${SETS[kind]?.name ?? "SET"} ADDED`);
-      clearTimeout(t1);
-      clearTimeout(t2);
-      t1 = setTimeout(() => setBump(false), 450);
-      t2 = setTimeout(() => setToast(null), 1900);
-    };
-
-    window.addEventListener("dragon:ate", onAte);
-    return () => {
-      window.removeEventListener("dragon:ate", onAte);
-      clearTimeout(t1);
-      clearTimeout(t2);
     };
   }, []);
 
@@ -135,7 +219,6 @@ export default function Home() {
 
               <ambientLight intensity={0.35} />
 
-              {/* тёплый основной свет спереди-слева (отбрасывает тени) */}
               <directionalLight
                 position={[-5, 6, 4]}
                 intensity={2.4}
@@ -151,9 +234,7 @@ export default function Home() {
                 shadow-bias={-0.0004}
                 shadow-normalBias={0.04}
               />
-              {/* красный контровой свет сзади справа */}
               <directionalLight position={[5, 3, -6]} intensity={4.5} color="#ff3b1f" />
-              {/* холодный контур слева сзади */}
               <directionalLight position={[-6, 3, -5]} intensity={1.6} color="#6a8cff" />
 
               <Decor />
@@ -199,15 +280,19 @@ export default function Home() {
               {SETS.map((s, i) => (
                 <div className="set-row" key={s.id}>
                   <span className="set-num">{s.id}</span>
-                  <div className="set-main">
+                  <button
+                    className="set-main"
+                    onClick={() => openSet(i)}
+                    aria-label={`Open details of ${s.name}`}
+                  >
                     <h3>{s.name}</h3>
-                    <p>{s.note}</p>
-                  </div>
-                  <strong className="set-price">{s.price}</strong>
+                    <p>{s.contents.map((c) => c[0]).slice(0, 2).join(" · ")}</p>
+                  </button>
+                  <strong className="set-price">{s.price} AZN</strong>
                   <button
                     className="feed-btn"
                     onClick={() => feed(i)}
-                    aria-label={`Add ${s.name} to cart`}
+                    aria-label={`Feed the dragon ${s.name}`}
                   >
                     FEED +
                   </button>
@@ -219,39 +304,23 @@ export default function Home() {
               <span>SCROLL</span>
               <i />
             </div>
-
-            <div className={`toast ${toast ? "on" : ""}`}>{toast}</div>
           </div>
-
-          {/* NAVBAR */}
-          <nav className="navbar">
-            <div className="logo">
-              DRAGON<span>SUSHI</span>
-            </div>
-
-            <div className="nav-links">
-              <a href="#home">HOME</a>
-              <a href="#sets">SETS</a>
-              <a href="#menu">MENU</a>
-              <a href="#about">ABOUT</a>
-            </div>
-
-            <button className={`cart ${bump ? "bump" : ""}`}>
-              CART <span>{cart}</span>
-            </button>
-          </nav>
         </div>
       </section>
 
+      <KatanaDivider />
+
       {/* INTRO */}
 
-      <section className="intro" id="home">
+      <section className="intro" id="intro">
 
         <p>JAPANESE SUSHI EXPERIENCE</p>
 
         <h1>
-          TASTE THE
-          <span>DRAGON</span>
+          <SliceTitle>
+            TASTE THE
+            <span>DRAGON</span>
+          </SliceTitle>
         </h1>
 
         <div className="intro-line" />
@@ -272,76 +341,148 @@ export default function Home() {
             <p>OUR COLLECTION</p>
 
             <h2>
-              SUSHI
-              <span>SETS</span>
+              <SliceTitle>
+                SUSHI
+                <span>SETS</span>
+              </SliceTitle>
             </h2>
           </div>
 
           <p className="section-description">
-            Carefully crafted sushi sets made for every occasion.
+            Carefully crafted sushi sets made for every occasion. Tap a set to unroll its scroll.
           </p>
 
         </div>
 
         <div className="sushi-grid">
-
-          <article className="sushi-card">
-            <div className="sushi-image">
-              <div className="sushi-placeholder">🍣</div>
-            </div>
-            <div className="sushi-info">
-              <div>
-                <p>01</p>
-                <h3>DRAGON SET</h3>
+          {SETS.map((s, i) => (
+            <button
+              className="sushi-card"
+              key={s.id}
+              onClick={() => openSet(i)}
+              aria-label={`Open the scroll of ${s.name}`}
+            >
+              <div className="sushi-image">
+                <span className="card-kanji" aria-hidden="true">{s.jp}</span>
+                <SushiArt kind={s.kind} />
+                <span className="card-more">OPEN THE SCROLL</span>
               </div>
-              <strong>35 AZN</strong>
-            </div>
-          </article>
 
-          <article className="sushi-card">
-            <div className="sushi-image">
-              <div className="sushi-placeholder">🍱</div>
-            </div>
-            <div className="sushi-info">
-              <div>
-                <p>02</p>
-                <h3>SAKURA SET</h3>
+              <div className="sushi-info">
+                <div>
+                  <p>{s.id}</p>
+                  <h3>{s.name}</h3>
+                </div>
+                <strong>{s.price} AZN</strong>
               </div>
-              <strong>42 AZN</strong>
-            </div>
-          </article>
-
-          <article className="sushi-card">
-            <div className="sushi-image">
-              <div className="sushi-placeholder">🍙</div>
-            </div>
-            <div className="sushi-info">
-              <div>
-                <p>03</p>
-                <h3>KYOTO SET</h3>
-              </div>
-              <strong>48 AZN</strong>
-            </div>
-          </article>
-
+            </button>
+          ))}
         </div>
 
       </section>
 
-      {/* ABOUT */}
+      <KatanaDivider />
 
-      <section className="about-section" id="about">
+      {/* PHILOSOPHY */}
+
+      <section className="about-section" id="philosophy">
 
         <p>OUR PHILOSOPHY</p>
 
         <h2>
-          TRADITION
-          <br />
-          MEETS
-          <span>MODERN</span>
+          <SliceTitle>
+            TRADITION
+            <br />
+            MEETS
+            <span>MODERN</span>
+          </SliceTitle>
         </h2>
 
       </section>
+
+      <KatanaDivider />
+
+      {/* FOOTER с лампочкой */}
+      <Footer />
+
+      {/* NAVBAR (закреплён внизу) */}
+      <nav className="navbar navbar-fixed">
+        <div className="logo">
+          DRAGON<span>SUSHI</span>
+        </div>
+
+        <div className="nav-links">
+          <a
+            href="#home"
+            className={activeNav === "home" ? "active" : ""}
+            onClick={(e) => navClick(e, "home")}
+          >
+            HOME
+          </a>
+          <a
+            href="#sets"
+            className={activeNav === "sets" ? "active" : ""}
+            onClick={(e) => navClick(e, "sets")}
+          >
+            SETS
+          </a>
+          <a
+            href="#menu"
+            className={activeNav === "menu" ? "active" : ""}
+            onClick={(e) => navClick(e, "menu")}
+          >
+            MENU
+          </a>
+          <a
+            href="#about"
+            className={activeNav === "about" ? "active" : ""}
+            onClick={(e) => navClick(e, "about")}
+          >
+            ABOUT
+          </a>
+        </div>
+
+        <button
+          className={`cart ${bump ? "bump" : ""}`}
+          onClick={() => setCartOpen(true)}
+          aria-label="Open cart"
+        >
+          CART <span>{cartCount}</span>
+        </button>
+      </nav>
+
+      {/* КОРЗИНА */}
+      <Cart
+        open={cartOpen}
+        items={cartItems}
+        onClose={() => setCartOpen(false)}
+        onChange={changeQty}
+        onClear={() => setCart({})}
+        onCheckout={checkout}
+      />
+
+      {/* СВИТОК с информацией о суши */}
+      <SushiScroll
+        item={openId === null ? null : SETS[openId]}
+        onClose={closeSet}
+        onAdd={addToCart}
+      />
+
+      {/* удар катаны по экрану */}
+      {slash && (
+        <div
+          key={slash.k}
+          className="slash-fx"
+          style={{ "--a": `${slash.a}deg` } as CSSProperties}
+        >
+          <div className="slash-flash" />
+          <div className="slash-blade" />
+          <div className="slash-blade ghost" />
+        </div>
+      )}
+
+      {/* уведомления */}
+      <div className={`toast toast-fixed ${toast ? "on" : ""}`}>{toast}</div>
 
     </main>
   );

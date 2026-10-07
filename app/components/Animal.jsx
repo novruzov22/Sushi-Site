@@ -36,7 +36,11 @@ const JAW_DIR = 1; // если пасть открывается вверх — 
 
 // Крылья
 const WING_BEAT = 0.38; // размах взмахов при еде (больше = сильнее машет)
-const WING_W = [0.5, 0.7, 0.6, 0.5]; // вклад каждой кости крыла (от плеча к кончику)
+const WING_W = [0.5, 0.7, 0.6, 0.5];
+
+// Огонь
+const FIRE_RATE = 300; // частиц пламени в секунду (больше = гуще огонь)
+const FIRE_LIGHT = 38; // яркость света от огня
 
 const FISH_COLORS = ["#ff6a3d", "#ff9fb5", "#7bbf4a"];
 
@@ -137,6 +141,7 @@ export default function Dragon({ progressRef }) {
   const eyeRefs = useRef([]);
   const glowMats = useRef([]);
   const headLight = useRef();
+  const fireLight = useRef();
   const sushiRef = useRef();
   const nigiriRef = useRef();
   const makiRef = useRef();
@@ -148,12 +153,26 @@ export default function Dragon({ progressRef }) {
   const { actions } = useAnimations(animations, group);
 
   const glowTex = useMemo(() => getSoftTex(), []);
+
+  // Общая "раскалённость" красных трещин на теле дракона
+  const heatU = useMemo(() => ({ value: 0.4 }), []);
+
   const embers = useMemo(
-    () => new Pool(1200, { additive: true, color: "#ff8a3a", drag: 0.15, flicker: true }),
+    () => new Pool(1400, { additive: true, color: "#ff8a3a", drag: 0.15, flicker: true }),
     []
   );
   const smoke = useMemo(
     () => new Pool(900, { additive: false, color: "#a89a90", drag: 0.6 }),
+    []
+  );
+  // пламя: цвет меняется по возрасту частицы
+  const fire = useMemo(
+    () => new Pool(1100, { additive: true, fire: true, drag: 1.4, turb: 1.1 }),
+    []
+  );
+  // чёрная копоть от огня
+  const soot = useMemo(
+    () => new Pool(500, { additive: false, color: "#2f2926", drag: 0.5 }),
     []
   );
 
@@ -161,8 +180,10 @@ export default function Dragon({ progressRef }) {
     () => () => {
       embers.dispose();
       smoke.dispose();
+      fire.dispose();
+      soot.dispose();
     },
-    [embers, smoke]
+    [embers, smoke, fire, soot]
   );
 
   const V = useMemo(
@@ -192,7 +213,9 @@ export default function Dragon({ progressRef }) {
     smokeAcc: 0,
     mouthSmokeAcc: 0,
     emberAcc: 0,
-    fireAcc: 0,
+    flameAcc: 0,
+    sparkAcc: 0,
+    sootAcc: 0,
     dustAcc: 0,
     wingPhase: 0,
     shake: 0,
@@ -214,12 +237,28 @@ export default function Dragon({ progressRef }) {
       if (o.isBone) boneMap[norm(o.name)] = o;
       if (o.isMesh || o.isSkinnedMesh) {
         o.frustumCulled = false;
-        o.castShadow = true; // дракон отбрасывает тень
+        o.castShadow = true;
         meshes.push(o);
         const mats = Array.isArray(o.material) ? o.material : [o.material];
         mats.forEach((m) => {
           if (!m) return;
           m.side = THREE.DoubleSide;
+
+          // Красные трещины на теле "раскалены" и пульсируют
+          if (!m.userData.heatPatched) {
+            m.userData.heatPatched = true;
+            m.onBeforeCompile = (shader) => {
+              shader.uniforms.uHeat = heatU;
+              shader.fragmentShader = shader.fragmentShader
+                .replace("void main() {", "uniform float uHeat;\nvoid main() {")
+                .replace(
+                  "#include <emissivemap_fragment>",
+                  `#include <emissivemap_fragment>
+                   float redMask = clamp((diffuseColor.r - max(diffuseColor.g, diffuseColor.b)) * 3.2, 0.0, 1.0);
+                   totalEmissiveRadiance += vec3(1.0, 0.2, 0.04) * redMask * uHeat;`
+                );
+            };
+          }
           m.needsUpdate = true;
         });
       }
@@ -316,7 +355,7 @@ export default function Dragon({ progressRef }) {
     camera.near = 0.05;
     camera.far = 500;
     camera.updateProjectionMatrix();
-  }, [scene, camera]);
+  }, [scene, camera, heatU]);
 
   /* ===== Встроенная анимация (дыхание) ===== */
   useEffect(() => {
@@ -400,6 +439,7 @@ export default function Dragon({ progressRef }) {
     let eyeBoost = 0;
     let beat = 0; // сила взмахов крыльев
     let snort = 0; // сила фырканья носом
+    let fireAmt = 0; // сила огня изо рта
 
     st.roarCool = Math.max(0, st.roarCool - dt);
 
@@ -443,9 +483,7 @@ export default function Dragon({ progressRef }) {
       flare = (0.5 * e1 + 0.5 * e2) * (1 - e3);
       eyeBoost = 0.5 * e2 * (1 - e3);
 
-      // крылья машут во время еды
       beat = ease(seg(t, 0.25, 0.6)) * (1 - ease(seg(t, 1.3, 2.1)));
-      // фыркает перед броском
       snort = e1 * (1 - seg(t, 1.1, 1.25));
 
       if (t < 1.12) {
@@ -516,26 +554,8 @@ export default function Dragon({ progressRef }) {
       snort = open * 0.6;
       st.shake = Math.max(st.shake, 0.5 * open);
 
-      if (t > 0.25 && t < 1.3) {
-        st.fireAcc += dt * 140;
-        while (st.fireAcc >= 1) {
-          st.fireAcc -= 1;
-          const sp = rnd(1.6, 3.6);
-          embers.emit(
-            V.mouth.x,
-            V.mouth.y,
-            V.mouth.z,
-            V.hf.x * sp + rnd(-0.5, 0.5),
-            V.hf.y * sp + rnd(0, 0.7),
-            V.hf.z * sp + rnd(-0.5, 0.5),
-            rnd(0.7, 1.7),
-            rnd(0.05, 0.09),
-            0.015,
-            1,
-            -0.4
-          );
-        }
-      }
+      // огонь: нарастает, держится, затухает
+      fireAmt = ease(seg(t, 0.25, 0.42)) * (1 - ease(seg(t, 1.12, 1.38)));
 
       if (t >= 1.7) st.mode = "idle";
     }
@@ -553,6 +573,10 @@ export default function Dragon({ progressRef }) {
     g.rotation.set(bodyPitch, DRAGON_YAW, 0);
 
     if (mainAction.current) mainAction.current.timeScale = 1 + eyeBoost * 0.3;
+
+    // Раскалённость трещин: дыхание + огонь + еда
+    heatU.value =
+      0.35 + 0.12 * Math.sin(time * 1.7) + 1.4 * fireAmt + 0.5 * eyeBoost + 0.4 * beat;
 
     /* ---------- кости ---------- */
     const rot = (name, axis, ang) => {
@@ -633,7 +657,77 @@ export default function Dragon({ progressRef }) {
       headLight.current.intensity = 5 + eyeBoost * 9 + Math.sin(time * 2) * 0.8;
     }
 
-    /* ---------- дым из носа (сильнее) ---------- */
+    // Свет от огня освещает всю сцену (мерцает)
+    if (fireLight.current) {
+      fireLight.current.position.copy(V.mouth).addScaledVector(V.hf, 1.3);
+      fireLight.current.intensity =
+        fireAmt * (FIRE_LIGHT + Math.sin(time * 37) * 8 + Math.sin(time * 23) * 6);
+    }
+
+    /* ---------- ОГОНЬ изо рта ---------- */
+    if (fireAmt > 0.01) {
+      // пламя (цвет меняется от белого ядра к красному)
+      st.flameAcc += dt * FIRE_RATE * fireAmt;
+      while (st.flameAcc >= 1) {
+        st.flameAcc -= 1;
+        const sp = rnd(2.8, 5.2);
+        fire.emit(
+          V.mouth.x + rnd(-0.03, 0.03),
+          V.mouth.y + rnd(-0.03, 0.03),
+          V.mouth.z + rnd(-0.03, 0.03),
+          (V.hf.x + rnd(-1, 1) * 0.28) * sp,
+          (V.hf.y + rnd(-1, 1) * 0.22) * sp + 0.2,
+          (V.hf.z + rnd(-1, 1) * 0.28) * sp,
+          rnd(0.45, 0.95),
+          rnd(0.08, 0.14),
+          rnd(0.5, 0.95),
+          0.9,
+          1.3
+        );
+      }
+
+      // искры, вылетающие из пламени
+      st.sparkAcc += dt * 110 * fireAmt;
+      while (st.sparkAcc >= 1) {
+        st.sparkAcc -= 1;
+        const sp = rnd(2, 5.5);
+        embers.emit(
+          V.mouth.x,
+          V.mouth.y,
+          V.mouth.z,
+          (V.hf.x + rnd(-1, 1) * 0.45) * sp,
+          (V.hf.y + rnd(-0.3, 1) * 0.45) * sp,
+          (V.hf.z + rnd(-1, 1) * 0.45) * sp,
+          rnd(0.8, 1.9),
+          rnd(0.03, 0.07),
+          0.01,
+          1,
+          -0.3
+        );
+      }
+
+      // чёрная копоть над огнём
+      st.sootAcc += dt * 45 * fireAmt;
+      while (st.sootAcc >= 1) {
+        st.sootAcc -= 1;
+        const d = rnd(0.5, 2.2);
+        soot.emit(
+          V.mouth.x + V.hf.x * d,
+          V.mouth.y + V.hf.y * d + 0.1,
+          V.mouth.z + V.hf.z * d,
+          V.hf.x * 0.5 + rnd(-0.2, 0.2),
+          rnd(0.35, 0.8),
+          V.hf.z * 0.5 + rnd(-0.2, 0.2),
+          rnd(2.5, 4),
+          0.2,
+          rnd(0.8, 1.3),
+          0.3,
+          0.25
+        );
+      }
+    }
+
+    /* ---------- дым из носа ---------- */
     const exhale = Math.max(0, Math.sin(time * 1.1));
     st.smokeAcc += dt * (16 + 70 * exhale * exhale + 130 * snort);
     const noseSpeed = 0.4 + 0.5 * exhale + 0.6 * snort;
@@ -652,26 +746,6 @@ export default function Dragon({ progressRef }) {
         rnd(2.6, 4.4),
         0.07,
         rnd(0.45, 0.8),
-        0.24,
-        0.1
-      );
-    }
-
-    // дым изо рта при рыке
-    const roaring = st.mode === "roar" && st.t > 0.25 && st.t < 1.35;
-    st.mouthSmokeAcc += dt * (roaring ? 90 : 0);
-    while (st.mouthSmokeAcc >= 1) {
-      st.mouthSmokeAcc -= 1;
-      smoke.emit(
-        V.mouth.x,
-        V.mouth.y,
-        V.mouth.z,
-        V.hf.x * 1.3 + rnd(-0.1, 0.1),
-        V.hf.y * 1.3 + 0.22,
-        V.hf.z * 1.3 + rnd(-0.1, 0.1),
-        rnd(2.4, 3.8),
-        0.08,
-        rnd(0.4, 0.75),
         0.24,
         0.1
       );
@@ -744,6 +818,8 @@ export default function Dragon({ progressRef }) {
       (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2));
     embers.update(dt, time, scalePx);
     smoke.update(dt, time, scalePx);
+    fire.update(dt, time, scalePx);
+    soot.update(dt, time, scalePx);
 
     /* ---------- камера (зависит от скролла) ---------- */
     if (!st.hsInit) {
@@ -848,6 +924,15 @@ export default function Dragon({ progressRef }) {
         decay={2}
       />
 
+      {/* свет от огня (включается при рыке) */}
+      <pointLight
+        ref={fireLight}
+        color="#ff8a3a"
+        intensity={0}
+        distance={14}
+        decay={2}
+      />
+
       {/* суши для кормления */}
       <group ref={sushiRef} visible={false}>
         <sprite scale={[1.2, 1.2, 1]}>
@@ -913,8 +998,10 @@ export default function Dragon({ progressRef }) {
         </group>
       </group>
 
-      {/* искры и дым */}
+      {/* огонь, дым, копоть, искры */}
+      <primitive object={soot.points} />
       <primitive object={smoke.points} />
+      <primitive object={fire.points} />
       <primitive object={embers.points} />
     </>
   );

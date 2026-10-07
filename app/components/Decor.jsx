@@ -194,6 +194,83 @@ const paperTex = () =>
     )
   );
 
+// Ваши бумага (washi): длинные хаотичные волокна поверх кремового FBM-фона
+const washiTex = () =>
+  getTex("washi", () =>
+    canvasTex(256, 256, (x, w, h) => {
+      // базовый кремовый шум
+      pixels(x, w, h, (i, j) => {
+        const n = fbm(i / 8, j / 8, 0, 7, 3);
+        const lum = 232 + Math.round(n * 18);
+        return [lum, lum - 10, lum - 22];
+      });
+      // длинные полупрозрачные волокна
+      const rnd = mulberry(31);
+      x.lineCap = "round";
+      for (let i = 0; i < 260; i++) {
+        const px = rnd() * w;
+        const py = rnd() * h;
+        const a = rnd() * Math.PI;
+        const len = 20 + rnd() * 68;
+        const alpha = 0.05 + rnd() * 0.11;
+        x.strokeStyle = `rgba(120,100,72,${alpha})`;
+        x.lineWidth = 0.3 + rnd() * 1.0;
+        x.beginPath();
+        x.moveTo(px - Math.cos(a) * len, py - Math.sin(a) * len);
+        x.lineTo(px + Math.cos(a) * len, py + Math.sin(a) * len);
+        x.stroke();
+      }
+    })
+  );
+
+// Камень: крупный шум + тёмные прожилки + светлые кварцевые прожилки
+const stoneTex = () =>
+  getTex("stone", () =>
+    canvasTex(256, 256, (x, w, h) => {
+      // 1) базовый серо-холодный шум
+      pixels(x, w, h, (i, j) => {
+        const coarse = fbm(i / 28, j / 28, 0, 1, 3);
+        const fine   = fbm(i / 6,  j / 6,  0, 5, 3);
+        const b = 0.28 + 0.38 * coarse + 0.14 * fine;
+        return [
+          Math.round(72  + 110 * b),
+          Math.round(74  + 108 * b),
+          Math.round(78  + 112 * b),
+        ];
+      });
+      // 2) тёмные прожилки
+      const rnd = mulberry(13);
+      x.lineCap = "round";
+      for (let k = 0; k < 14; k++) {
+        const x0 = rnd() * w;
+        const y0 = rnd() * h;
+        const x1 = x0 + (rnd() - 0.5) * w * 0.8;
+        const y1 = y0 + (rnd() - 0.5) * h * 0.8;
+        const cx = (x0 + x1) / 2 + (rnd() - 0.5) * 60;
+        const cy = (y0 + y1) / 2 + (rnd() - 0.5) * 60;
+        x.strokeStyle = `rgba(28,26,34,${0.08 + rnd() * 0.14})`;
+        x.lineWidth = 0.5 + rnd() * 2.0;
+        x.beginPath();
+        x.moveTo(x0, y0);
+        x.quadraticCurveTo(cx, cy, x1, y1);
+        x.stroke();
+      }
+      // 3) светлые кварцевые прожилки
+      for (let k = 0; k < 8; k++) {
+        const x0 = rnd() * w;
+        const y0 = rnd() * h;
+        const x1 = x0 + (rnd() - 0.5) * w * 0.5;
+        const y1 = y0 + (rnd() - 0.5) * h * 0.5;
+        x.strokeStyle = `rgba(225,222,238,${0.07 + rnd() * 0.10})`;
+        x.lineWidth = 0.4 + rnd() * 1.2;
+        x.beginPath();
+        x.moveTo(x0, y0);
+        x.lineTo(x1, y1);
+        x.stroke();
+      }
+    })
+  );
+
 // Бамбук: полосы вокруг ствола
 const bambooTex = () =>
   getTex("bamboo", () =>
@@ -303,26 +380,54 @@ const F = (id) => LAYOUT.fixed.find((f) => f.id === id);
  *  ТЕНИ-КОНТАКТЫ И ЗЕМЛЯ
  * ========================================================= */
 
+/**
+ * ContactBlob — трёхслойная мягкая контактная тень:
+ *   1) halo   — большой прозрачный ореол
+ *   2) core   — средний основной спад
+ *   3) center — плотная центральная точка
+ *
+ * w / d  — ширина/глубина (в единицах сцены) базового слоя
+ * opacity — прозрачность центрального слоя (halo и core масштабируются автоматически)
+ */
 function Blob({ x, z, w = 2, d = 2, opacity = 0.4 }) {
   const tex = useMemo(() => getSoftTex(), []);
+  // Y-смещения для исключения z-fighting
+  const y0 = G + 0.008;
+  const y1 = G + 0.012;
+  const y2 = G + 0.016;
+
+  const mat = (op) => (
+    <meshBasicMaterial
+      map={tex}
+      color="#000000"
+      transparent
+      opacity={op}
+      depthWrite={false}
+      toneMapped={false}
+    />
+  );
+
   return (
-    <mesh
-      position={[x, G + 0.01, z]}
-      rotation={[-Math.PI / 2, 0, 0]}
-      scale={[w, d, 1]}
-    >
-      <planeGeometry args={[1, 1]} />
-      <meshBasicMaterial
-        map={tex}
-        color="#000000"
-        transparent
-        opacity={opacity}
-        depthWrite={false}
-        toneMapped={false}
-      />
-    </mesh>
+    <>
+      {/* 1. halo — крупный, очень мягкий */}
+      <mesh position={[x, y0, z]} rotation={[-Math.PI / 2, 0, 0]} scale={[w * 2.6, d * 2.6, 1]}>
+        <planeGeometry args={[1, 1]} />
+        {mat(opacity * 0.18)}
+      </mesh>
+      {/* 2. core — средний спад */}
+      <mesh position={[x, y1, z]} rotation={[-Math.PI / 2, 0, 0]} scale={[w * 1.3, d * 1.3, 1]}>
+        <planeGeometry args={[1, 1]} />
+        {mat(opacity * 0.48)}
+      </mesh>
+      {/* 3. center — плотная точка контакта */}
+      <mesh position={[x, y2, z]} rotation={[-Math.PI / 2, 0, 0]} scale={[w * 0.55, d * 0.55, 1]}>
+        <planeGeometry args={[1, 1]} />
+        {mat(opacity)}
+      </mesh>
+    </>
   );
 }
+
 
 function Ground() {
   const map = useMemo(() => {
@@ -480,6 +585,11 @@ function makeStoneGeo(seed) {
 
 function Stone({ x, z, s = 1, seed = 1 }) {
   const geo = useMemo(() => makeStoneGeo(seed), [seed]);
+  const stex = useMemo(() => {
+    const t = stoneTex();
+    t.repeat.set(1.8, 1.8);
+    return t;
+  }, []);
   return (
     <>
       <mesh
@@ -490,12 +600,20 @@ function Stone({ x, z, s = 1, seed = 1 }) {
         castShadow
         receiveShadow
       >
-        <meshStandardMaterial vertexColors roughness={0.96} metalness={0} />
+        <meshStandardMaterial
+          map={stex}
+          bumpMap={stex}
+          bumpScale={1.8}
+          vertexColors
+          roughness={0.95}
+          metalness={0.02}
+        />
       </mesh>
-      <Blob x={x} z={z} w={2.9 * s} d={2.5 * s} opacity={0.4} />
+      <Blob x={x} z={z} w={2.6 * s} d={2.2 * s} opacity={0.42} />
     </>
   );
 }
+
 
 /* =========================================================
  *  СУШИ
